@@ -218,6 +218,22 @@ static void dcc_gssapi_show_principal(void) {
 #endif
 
 /**
+ * On Windows, Ninja/CMake may pass the compiler path with backslashes.
+ * Normalize it to forward slashes so that remote servers and DISTCC_CMDLIST
+ * matching see a stable form; MSYS2 accepts drive-letter paths either way.
+ **/
+static void dcc_normalize_path_separators(char *path)
+{
+    char *p;
+
+    if (!path)
+        return;
+    for (p = path; *p; p++)
+        if (*p == '\\')
+            *p = '/';
+}
+
+/**
  * distcc client entry point.
  *
  * This is typically called by make in place of the real compiler.
@@ -315,6 +331,7 @@ int main(int argc, char **argv)
         if ((ret = dcc_find_compiler(argv, &compiler_args)) != 0) {
             goto out;
         }
+        dcc_normalize_path_separators(compiler_args[0]);
         /* compiler_args is now respectively either "cc -c hello.c" or
          * "gcc -c hello.c" */
 

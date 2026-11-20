@@ -65,6 +65,7 @@
     #define RC_INVOKED
     #define NOWINRES
     #include <windows.h>
+    #include <sys/cygwin.h>
 #endif
 
 #include "distcc.h"
@@ -133,13 +134,36 @@ int dcc_redirect_fds(const char *stdin_file,
 
 
 #ifdef __CYGWIN__
+/* Convert a POSIX path into a Win32 path for kernel32 APIs such as CreateFile.
+ * Returns the original path when conversion is not possible. */
+static const char *dcc_win32_path(const char *path, char *buf, size_t buflen)
+{
+    if (cygwin_conv_path(CCP_POSIX_TO_WIN_A, path, buf, buflen) == 0)
+        return buf;
+    return path;
+}
+
+/* Convert POSIX-style path arguments (e.g. distcc's temp .ii/.o files) into
+ * Win32 paths before passing them to a native compiler. */
+static const char *dcc_win32_arg(const char *arg, char *buf, size_t buflen)
+{
+    if (arg[0] == '/' && strcmp(arg, "/dev/null") != 0 &&
+        cygwin_conv_path(CCP_POSIX_TO_WIN_A, arg, buf, buflen) == 0)
+        return buf;
+    return arg;
+}
+
 /* Execute a process WITHOUT console window and correctly redirect output. */
 static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
     const char *output_file, const char *error_file)
 {
     STARTUPINFO    m_siStartInfo;
     PROCESS_INFORMATION m_piProcInfo;
-    char cmdline[MAX_PATH+1]={0};
+    char *cmdline = NULL;
+    char in_win[4096], out_win[4096], err_win[4096];
+    const char *in_path = input_file;
+    const char *out_path = output_file;
+    const char *err_path = error_file;
     HANDLE stdin_hndl=INVALID_HANDLE_VALUE;
     HANDLE stdout_hndl=INVALID_HANDLE_VALUE;
     HANDLE stderr_hndl=INVALID_HANDLE_VALUE;
@@ -150,10 +174,21 @@ static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
     ZeroMemory(&m_siStartInfo, sizeof(STARTUPINFO));
     ZeroMemory( &m_piProcInfo, sizeof(PROCESS_INFORMATION) );
 
+
+    /* Win32 APIs don't understand MSYS2/Cygwin POSIX paths, so convert the
+     * redirection targets (usually under TMPDIR) before opening them. */
+    if (input_file && strcmp(input_file,"/dev/null")!=0)
+        in_path = dcc_win32_path(input_file, in_win, sizeof(in_win));
+    if (output_file && strcmp(output_file,"/dev/null")!=0)
+        out_path = dcc_win32_path(output_file, out_win, sizeof(out_win));
+    if (error_file && strcmp(error_file,"/dev/null")!=0)
+        err_path = dcc_win32_path(error_file, err_win, sizeof(err_win));
+
+
     /* Open files for IO redirection */
     if (input_file && strcmp(input_file,"/dev/null")!=0)
     {
-        if ((stdin_hndl = CreateFile(input_file,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_ALWAYS,
+        if ((stdin_hndl = CreateFile(in_path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_ALWAYS,
             FILE_ATTRIBUTE_TEMPORARY,NULL)) == INVALID_HANDLE_VALUE) {
             exit_code = GetLastError();
             goto cleanup;
@@ -163,7 +198,7 @@ static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
 
     if (output_file && strcmp(output_file,"/dev/null")!=0)
     {
-        if ((stdout_hndl = CreateFile(output_file,GENERIC_WRITE,FILE_SHARE_READ,NULL,
+        if ((stdout_hndl = CreateFile(out_path,GENERIC_WRITE,FILE_SHARE_READ,NULL,
             CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY,NULL)) == INVALID_HANDLE_VALUE) {
             exit_code = GetLastError();
             goto cleanup;
@@ -173,7 +208,7 @@ static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
 
     if (error_file && strcmp(error_file,"/dev/null")!=0)
     {
-        if ((stderr_hndl = CreateFile(error_file, GENERIC_WRITE,
+        if ((stderr_hndl = CreateFile(err_path, GENERIC_WRITE,
             FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,
             OPEN_ALWAYS, FILE_ATTRIBUTE_TEMPORARY,NULL)) == INVALID_HANDLE_VALUE) {
             exit_code = GetLastError();
@@ -198,14 +233,37 @@ static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
     m_siStartInfo.hStdOutput = stdout_hndl;
     m_siStartInfo.hStdError = stderr_hndl;
 
-    /* Create command line */
-    for (ptr=argv;*ptr!=NULL;ptr++)
+    /* Build the command line dynamically: real compiler invocations can be
+     * far longer than MAX_PATH. */
     {
-        strcat(cmdline, *ptr);
-        strcat(cmdline, " ");
+        char arg_win[4096];
+        size_t cmdline_len = 0;
+        for (ptr = argv; *ptr != NULL; ptr++) {
+            const char *arg = dcc_win32_arg(*ptr, arg_win, sizeof(arg_win));
+            cmdline_len += strlen(arg) + 3; /* optional quotes + space */
+        }
+
+        cmdline = malloc(cmdline_len + 1);
+        if (!cmdline) {
+            exit_code = ERROR_NOT_ENOUGH_MEMORY;
+            goto cleanup;
+        }
+        cmdline[0] = '\0';
+
+        for (ptr = argv; *ptr != NULL; ptr++) {
+            const char *arg = dcc_win32_arg(*ptr, arg_win, sizeof(arg_win));
+            int quote = strpbrk(arg, " \t") != NULL;
+            if (quote)
+                strcat(cmdline, "\"");
+            strcat(cmdline, arg);
+            if (quote)
+                strcat(cmdline, "\"");
+            strcat(cmdline, " ");
+        }
     }
 
     /* Create the child process.  */
+    rs_trace("win32 command line: %s", cmdline);
     bRet = CreateProcess(NULL,
         cmdline,        /* application name */
         NULL,           /* process security attributes */
@@ -218,8 +276,13 @@ static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
         &m_piProcInfo);  /* receives PROCESS_INFORMATION */
     if (!bRet) {
         exit_code = GetLastError();
+        rs_trace("CreateProcess failed with %lu", (unsigned long) exit_code);
         goto cleanup;
     }
+
+    /* CreateProcess copied the command line, so it can be released now. */
+    free(cmdline);
+    cmdline = NULL;
 
     WaitForSingleObject(m_piProcInfo.hProcess, (DWORD)(-1L));
     /* return termination code and exit code*/
@@ -228,6 +291,7 @@ static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
 
     /* We can get here only if process creation failed */
     cleanup:
+    if (cmdline) free(cmdline);
     if (stdin_hndl != INVALID_HANDLE_VALUE) CloseHandle(stdin_hndl);
     if (stdout_hndl != INVALID_HANDLE_VALUE) CloseHandle(stdout_hndl);
     if (stderr_hndl != INVALID_HANDLE_VALUE) CloseHandle(stderr_hndl);
