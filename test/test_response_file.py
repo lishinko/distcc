@@ -10,6 +10,7 @@ DISTCC_RSP_TEST_COMPILER 指定可执行文件。默认使用 localhost；
 （例如 127.0.0.1:42000,lzo），并验证编译确实在该端完成。
 """
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -107,6 +108,38 @@ class ResponseFileTest(unittest.TestCase):
         result = self.run_distcc("@empty.rsp")
         self.assertEqual(result.returncode, 101, result.stderr)
         self.assertIn("missing option/operand", result.stderr)
+
+    @unittest.skipUnless(WINDOWS_PATHS, "需要 Windows 响应文件引号规则")
+    def test_cpp_string_macro_from_response_file(self):
+        (self.work / "macro.cpp").write_text(
+            "constexpr char name[] = RSP_NAME;\n"
+            "static_assert(sizeof(name) == sizeof(\"Spatial.Foundation\"), \"name\");\n",
+            encoding="ascii")
+        (self.work / "macro args.rsp").write_text(
+            r'-DRSP_NAME=\"Spatial.Foundation\" -c macro.cpp -o macro.o' + "\n",
+            encoding="ascii")
+
+        result = self.run_distcc(self.compiler, "@macro args.rsp")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.work / "macro.o").is_file())
+        log = self.log.read_text(encoding="utf-8", errors="replace")
+        self.assertIn("expanding response file macro args.rsp", log)
+        self.assertIn("win32 command line:", log)
+        if self.server:
+            self.assertIn(" on {} completed ok".format(self.server), log)
+
+    @unittest.skipUnless(os.name == "nt", "需要 Windows 原生 Python")
+    def test_native_argument_round_trip(self):
+        # 让原生子进程回传实际收到的参数，检查空参数、引号及反斜杠。
+        expected = ["", "two words", 'a"b', 'a\\"b', 'a\\\\"b',
+                    "path with space\\", "path with space\\\\", "plain\\path"]
+        # 响应文件名带空格，使 MSYS 启动层将带引号的 @file 交给 distcc 展开。
+        args = ["-c", "import json, sys; print(json.dumps(sys.argv[1:]))", *expected]
+        (self.work / "native args.rsp").write_text(
+            subprocess.list2cmdline(args) + "\n", encoding="ascii")
+        result = self.run_distcc(Path(sys.executable).as_posix(), "@native args.rsp")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), expected)
 
 
 if __name__ == "__main__":

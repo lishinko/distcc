@@ -153,6 +153,48 @@ static const char *dcc_win32_arg(const char *arg, char *buf, size_t buflen)
     return arg;
 }
 
+/* 按 Windows 原生程序的 argv 规则编码单个参数。out 为 NULL 时只计算长度。 */
+static size_t dcc_win32_quote_arg(const char *arg, char *out)
+{
+    size_t len = 0;
+    int quoted = !*arg || strpbrk(arg, " \t\"") != NULL;
+
+    if (quoted) {
+        if (out)
+            out[len] = '"';
+        len++;
+    }
+
+    while (*arg) {
+        size_t slashes = 0;
+        while (*arg == '\\') {
+            slashes++;
+            arg++;
+        }
+        /* 字面引号前输出 2n+1 个反斜杠，闭合引号前输出 2n 个。 */
+        if (*arg == '"')
+            slashes = 2 * slashes + 1;
+        else if (!*arg && quoted)
+            slashes *= 2;
+        if (out)
+            memset(out + len, '\\', slashes);
+        len += slashes;
+        if (*arg) {
+            if (out)
+                out[len] = *arg;
+            len++;
+            arg++;
+        }
+    }
+
+    if (quoted) {
+        if (out)
+            out[len] = '"';
+        len++;
+    }
+    return len;
+}
+
 /* Execute a process WITHOUT console window and correctly redirect output. */
 static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
     const char *output_file, const char *error_file)
@@ -233,14 +275,20 @@ static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
     m_siStartInfo.hStdOutput = stdout_hndl;
     m_siStartInfo.hStdError = stderr_hndl;
 
-    /* Build the command line dynamically: real compiler invocations can be
-     * far longer than MAX_PATH. */
+    /* Windows 接收一整条命令行，需编码每个参数才能保留原始 argv。 */
     {
         char arg_win[4096];
         size_t cmdline_len = 0;
+        char *end;
+
         for (ptr = argv; *ptr != NULL; ptr++) {
             const char *arg = dcc_win32_arg(*ptr, arg_win, sizeof(arg_win));
-            cmdline_len += strlen(arg) + 3; /* optional quotes + space */
+            size_t len = dcc_win32_quote_arg(arg, NULL) + (ptr != argv);
+            if (len >= (size_t)-1 - cmdline_len) {
+                exit_code = ERROR_NOT_ENOUGH_MEMORY;
+                goto cleanup;
+            }
+            cmdline_len += len;
         }
 
         cmdline = malloc(cmdline_len + 1);
@@ -248,18 +296,14 @@ static DWORD dcc_execvp_cyg(char **argv, const char *input_file,
             exit_code = ERROR_NOT_ENOUGH_MEMORY;
             goto cleanup;
         }
-        cmdline[0] = '\0';
-
+        end = cmdline;
         for (ptr = argv; *ptr != NULL; ptr++) {
             const char *arg = dcc_win32_arg(*ptr, arg_win, sizeof(arg_win));
-            int quote = strpbrk(arg, " \t") != NULL;
-            if (quote)
-                strcat(cmdline, "\"");
-            strcat(cmdline, arg);
-            if (quote)
-                strcat(cmdline, "\"");
-            strcat(cmdline, " ");
+            if (ptr != argv)
+                *end++ = ' ';
+            end += dcc_win32_quote_arg(arg, end);
         }
+        *end = '\0';
     }
 
     /* Create the child process.  */
