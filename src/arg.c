@@ -717,6 +717,20 @@ int dcc_scan_args(char *argv[], char **input_file, char **output_file,
                 rs_log_info("compiler will emit .rpo files; must be local");
                 return EXIT_DISTCC_FAILED;
             } else if (str_startswith("-x", a)
+                       && (str_endswith("-header", a + 2)
+                           || (!strcmp(a, "-x") && argv[i+1]
+                               && str_endswith("-header", argv[i+1])))) {
+                /* PCH 是本地编译器的产物，不能发给其他主机生成。 */
+                rs_log_info("precompiled header generation must be local");
+                return EXIT_DISTCC_FAILED;
+            } else if (!strcmp(a, "-include-pch")) {
+                /* PCH 路径是选项的值，不能被当成第二个源文件。 */
+                if (!argv[i+1]) {
+                    rs_log_info("-include-pch requires a path; running locally");
+                    return EXIT_DISTCC_FAILED;
+                }
+                i++;
+            } else if (str_startswith("-x", a)
                        && argv[i+1]
                        && !str_startswith("c", argv[i+1])
                        && !str_startswith("c++", argv[i+1])

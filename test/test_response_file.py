@@ -1,4 +1,4 @@
-"""测试 distcc 的响应文件展开，可在 POSIX 和 Windows 上直接运行。
+"""测试 distcc 的响应文件展开和 Clang PCH 分发，可在 POSIX 和 Windows 上直接运行。
 
 现有 comfychair 测试框架用 os.fork() 启动子进程，Windows 原生 Python
 即使从 MSYS2 启动也没有这个接口。这组测试只需运行 distcc 并检查退出码、
@@ -8,6 +8,8 @@
 DISTCC_RSP_TEST_COMPILER 指定可执行文件。默认使用 localhost；
 设置 DISTCC_RSP_TEST_SERVER 可改用一个已启动的 TCP 服务端
 （例如 127.0.0.1:42000,lzo），并验证编译确实在该端完成。
+PCH 用例需要 Clang；Unity/PCH 分发用例必须指定服务端，不能用 localhost
+代替远端验证。所有分发用例都关闭故障回退，以免本地成功掩盖远端失败。
 """
 
 import json
@@ -162,6 +164,75 @@ class ResponseFileTest(unittest.TestCase):
         self.assertTrue((self.work / "sample.o").is_file())
         if self.server:
             self.assertIn(" on {} completed ok".format(self.server), log)
+
+    def require_clang(self):
+        version = subprocess.run([self.compiler, "--version"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, timeout=10)
+        if "clang" not in version.stdout.lower():
+            self.skipTest("需要 Clang 的 -include-pch 支持")
+
+    def test_pch_generation_stays_local(self):
+        self.require_clang()
+        (self.work / "prefix.cpp").write_text(
+            "struct PchType { int value; };\n", encoding="ascii")
+        # 即使没有可用远端且禁止回退，PCH 生成也应主动选择本地。
+        self.env["DISTCC_HOSTS"] = "127.0.0.1:1/1"
+        for language in ("c-header", "c++-header",
+                         "objective-c-header", "objective-c++-header"):
+            for joined in (False, True):
+                with self.subTest(language=language, joined=joined):
+                    self.log.unlink(missing_ok=True)
+                    (self.work / "prefix.pch").unlink(missing_ok=True)
+                    options = ["-x" + language] if joined else ["-x", language]
+                    result = self.run_distcc(
+                        self.compiler, *options, "-c", "prefix.cpp", "-o", "prefix.pch")
+                    log = self.log.read_text(encoding="utf-8", errors="replace")
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr + log)
+                    self.assertIn("precompiled header generation must be local", log)
+                    self.assertGreater((self.work / "prefix.pch").stat().st_size, 0)
+
+    def test_unity_source_with_pch_compiles_remotely(self):
+        self.require_clang()
+        if not self.server:
+            self.skipTest("需要 DISTCC_RSP_TEST_SERVER 验证远端编译")
+        (self.work / "pch files").mkdir()
+        (self.work / "pch files" / "prefix.h").write_text(
+            "struct PchType { int value; };\n"
+            "#define PCH_VALUE 42\n", encoding="ascii")
+        # .cpp 自身没有 include，模拟依赖强制引入头文件的 Unity 单元。
+        (self.work / "first.cpp").write_text(
+            "PchType first{PCH_VALUE};\n", encoding="ascii")
+        (self.work / "second.cpp").write_text(
+            "int result() { return first.value; }\n", encoding="ascii")
+        (self.work / "unity.cpp").write_text(
+            '#include "first.cpp"\n#include "second.cpp"\n', encoding="ascii")
+        result = self.run_distcc(
+            self.compiler, "-x", "c++-header", "-c", "pch files/prefix.h",
+            "-o", "pch files/cache.pch")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 额外用 .cpp 后缀，验证扫描器不会把 PCH 路径误认成源文件。
+        shutil.copyfile(self.work / "pch files/cache.pch",
+                        self.work / "pch files/cache.cpp")
+        for pch in ("pch files/cache.pch", "pch files/cache.cpp"):
+            with self.subTest(pch=pch):
+                self.log.unlink()
+                (self.work / "unity.o").unlink(missing_ok=True)
+                (self.work / "unity.rsp").write_text(
+                    '-include-pch "{}" -c unity.cpp -o unity.o\n'.format(pch),
+                    encoding="ascii")
+                result = self.run_distcc(self.compiler, "@unity.rsp")
+                log = self.log.read_text(encoding="utf-8", errors="replace")
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr + log)
+                self.assertIn(" on {} completed ok".format(self.server), log)
+                remote_args = [line for line in log.splitlines()
+                               if "(dcc_strip_local_args) result:" in line]
+                self.assertEqual(len(remote_args), 1, log)
+                self.assertNotIn("-include-pch", remote_args[0])
+                self.assertNotIn(pch, remote_args[0])
+                self.assertGreater((self.work / "unity.o").stat().st_size, 0)
 
 
 if __name__ == "__main__":
