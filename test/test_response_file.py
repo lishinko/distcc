@@ -141,6 +141,28 @@ class ResponseFileTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(result.stdout), expected)
 
+    @unittest.skipUnless(os.name == "nt", "需要从原生 Windows 进程启动 distcc")
+    def test_ninja_style_unquoted_response_file(self):
+        (self.work / "rsp").mkdir()
+        (self.work / "rsp" / "flags.rsp").write_text(
+            r'-DRSP_NAME=\"Spatial.Foundation\" -DRSP_TAIL=42' + "\n",
+            encoding="ascii")
+        (self.work / "sample.cpp").write_text(
+            "constexpr char name[] = RSP_NAME;\n"
+            "static_assert(sizeof(name) == sizeof(\"Spatial.Foundation\"), \"name\");\n"
+            "static_assert(RSP_TAIL == 42, \"tail\");\n",
+            encoding="ascii")
+
+        # Python 不会给无空格的参数加引号，与 Ninja 的调用方式一致。
+        result = self.run_distcc(self.compiler, r"@rsp\flags.rsp",
+                                 "-o", "sample.o", "-c", "sample.cpp")
+        log = self.log.read_text(encoding="utf-8", errors="replace")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr + log)
+        self.assertIn(r"expanding response file rsp\flags.rsp", log)
+        self.assertTrue((self.work / "sample.o").is_file())
+        if self.server:
+            self.assertIn(" on {} completed ok".format(self.server), log)
+
 
 if __name__ == "__main__":
     unittest.main()

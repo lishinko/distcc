@@ -41,6 +41,12 @@
 #include <errno.h>
 #include <signal.h>
 
+#ifdef __CYGWIN__
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
 #include "distcc.h"
 #include "trace.h"
 #include "exitcode.h"
@@ -223,6 +229,60 @@ static void dcc_normalize_path_separators(char *path)
             *p = '/';
 }
 
+#ifdef __CYGWIN__
+/* Windows 原生父进程传入的 @file 可能已经被 MSYS/Cygwin 在 main 前
+ * 展开。按 Windows 规则恢复原始参数，再让 distcc 自己读取响应文件。
+ * 同运行时的父进程通过启动数据传递 argv，原生命令行没有这些参数。 */
+static int dcc_recover_win32_rsp_argv(char **argv, char ***recovered)
+{
+    LPWSTR *raw;
+    int argc, i, ret = 0;
+    char **copy = NULL;
+
+    raw = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!raw)
+        return EXIT_OUT_OF_MEMORY;
+
+    for (i = 1; i < argc; i++)
+        if (raw[i][0] == L'@' && raw[i][1])
+            break;
+    if (i >= argc)
+        goto out;
+
+    copy = calloc((size_t)argc + 1, sizeof(*copy));
+    if (!copy || !(copy[0] = strdup(argv[0]))) {
+        ret = EXIT_OUT_OF_MEMORY;
+        goto out;
+    }
+    for (i = 1; i < argc; i++) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, raw[i], -1,
+                                      NULL, 0, NULL, NULL);
+        if (!len) {
+            ret = EXIT_BAD_ARGUMENTS;
+            goto out;
+        }
+        copy[i] = malloc((size_t)len);
+        if (!copy[i]) {
+            ret = EXIT_OUT_OF_MEMORY;
+            goto out;
+        }
+        if (!WideCharToMultiByte(CP_UTF8, 0, raw[i], -1,
+                                 copy[i], len, NULL, NULL)) {
+            ret = EXIT_BAD_ARGUMENTS;
+            goto out;
+        }
+    }
+    *recovered = copy;
+    copy = NULL;
+
+  out:
+    if (copy)
+        dcc_free_argv(copy);
+    LocalFree(raw);
+    return ret;
+}
+#endif
+
 /**
  * distcc client entry point.
  *
@@ -236,6 +296,9 @@ int main(int argc, char **argv)
     int status, sg_level, tweaked_path = 0;
     char **compiler_args = NULL; /* dynamically allocated */
     char **expanded_args = NULL;
+#ifdef __CYGWIN__
+    char **recovered_args = NULL;
+#endif
     char *compiler_name; /* points into argv[0] */
     int ret;
 
@@ -247,6 +310,16 @@ int main(int argc, char **argv)
     dcc_setup_log_email();
 
     dcc_trace_version();
+
+#ifdef __CYGWIN__
+    ret = dcc_recover_win32_rsp_argv(argv, &recovered_args);
+    if (ret != 0) {
+        rs_log_error("failed to recover Windows response file arguments");
+        goto out;
+    }
+    if (recovered_args)
+        argv = recovered_args;
+#endif
 
     /* Expand @FILE arguments, so that options kept in response files are
      * visible to the argument scanner and can be sent to a remote server. */
@@ -370,6 +443,10 @@ int main(int argc, char **argv)
     }
     if (expanded_args)
         dcc_free_argv(expanded_args);
+#ifdef __CYGWIN__
+    if (recovered_args)
+        dcc_free_argv(recovered_args);
+#endif
     dcc_maybe_send_email();
     dcc_exit(ret);
 }
