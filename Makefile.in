@@ -205,6 +205,7 @@ man8dir = $(mandir)/man8
 
 test_SOURCE = test/comfychair.py \
 	test/onetest.py \
+	test/test_response_file.py \
 	test/testdistcc.py \
 	find_c_extension.sh
 
@@ -724,7 +725,8 @@ maintainer-check-no-set-path:
 	    echo "Please change RESTRICTED_PATH to change this PATH value."; \
 	    exit 1; \
 	  fi; \
-	  $(PYTHON) "$(srcdir)/test/testdistcc.py" $(TESTDISTCC_OPTS); \
+	  $(PYTHON) "$(srcdir)/test/testdistcc.py" $(TESTDISTCC_OPTS) && \
+	  $(PYTHON) "$(srcdir)/test/test_response_file.py"; \
 	fi
 
 distcc-maintainer-check: check_programs
