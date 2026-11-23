@@ -41,16 +41,6 @@
 #include <errno.h>
 #include <signal.h>
 
-#if HAVE_LIBIBERTY
-#if defined (HAVE_LIBIBERTY_H)
-#include <libiberty.h>
-#elif defined (HAVE_LIBIBERTY_LIBIBERTY_H)
-#include <libiberty/libiberty.h>
-#else
-#error Need libiberty.h
-#endif
-#endif
-
 #include "distcc.h"
 #include "trace.h"
 #include "exitcode.h"
@@ -245,6 +235,7 @@ int main(int argc, char **argv)
 {
     int status, sg_level, tweaked_path = 0;
     char **compiler_args = NULL; /* dynamically allocated */
+    char **expanded_args = NULL;
     char *compiler_name; /* points into argv[0] */
     int ret;
 
@@ -257,10 +248,14 @@ int main(int argc, char **argv)
 
     dcc_trace_version();
 
-#if HAVE_LIBIBERTY
-    /* Expand @FILE arguments. */
-    expandargv(&argc, &argv);
-#endif
+    /* Expand @FILE arguments, so that options kept in response files are
+     * visible to the argument scanner and can be sent to a remote server. */
+    if ((ret = dcc_expand_response_files(&argv)) != 0) {
+        rs_log_error("failed to expand response files");
+        goto out;
+    }
+    expanded_args = argv;
+    argc = dcc_argv_len(argv);
 
     compiler_name = (char *) dcc_find_basename(argv[0]);
 
@@ -373,6 +368,8 @@ int main(int argc, char **argv)
     if (compiler_args) {
       dcc_free_argv(compiler_args);
     }
+    if (expanded_args)
+        dcc_free_argv(expanded_args);
     dcc_maybe_send_email();
     dcc_exit(ret);
 }
