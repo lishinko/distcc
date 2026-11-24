@@ -716,6 +716,24 @@ int dcc_scan_args(char *argv[], char **input_file, char **output_file,
             } else if (!strcmp(a, "-frepo")) {
                 rs_log_info("compiler will emit .rpo files; must be local");
                 return EXIT_DISTCC_FAILED;
+            } else if (!strcmp(a, "-Xclang")) {
+                if (!argv[i+1]) {
+                    rs_log_info("-Xclang requires an argument; running locally");
+                    return EXIT_DISTCC_FAILED;
+                }
+                if (!strcmp(argv[i+1], "-include-pch")
+                    || !strcmp(argv[i+1], "-include")) {
+                    /* 跳过完整四参数组，避免把包装过的路径当成源文件。 */
+                    if (!argv[i+2] || strcmp(argv[i+2], "-Xclang")
+                        || !argv[i+3]) {
+                        rs_log_info("incomplete -Xclang include group; running locally");
+                        return EXIT_DISTCC_FAILED;
+                    }
+                    i += 3;
+                } else {
+                    /* cc1 参数不按驱动参数扫描。 */
+                    i++;
+                }
             } else if (str_startswith("-x", a)
                        && (str_endswith("-header", a + 2)
                            || (!strcmp(a, "-x") && argv[i+1]

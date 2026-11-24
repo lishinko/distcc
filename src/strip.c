@@ -79,7 +79,23 @@ int dcc_strip_local_args(char **from, char ***out_argv)
     /* skip through argv, copying all arguments but skipping ones that
      * ought to be omitted */
     for (from_i = to_i = 0; from[from_i]; from_i++) {
-        if (str_equal("-D", from[from_i])
+        if (str_equal("-Xclang", from[from_i])) {
+            /* CMake 把 cc1 的选项和路径分别包装成 -Xclang 参数。
+             * 必须整组删除；其他包装参数保持原样，不能按驱动选项剥离。 */
+            if (from[from_i+1]
+                && (str_equal("-include-pch", from[from_i+1])
+                    || str_equal("-include", from[from_i+1]))
+                && from[from_i+2]
+                && str_equal("-Xclang", from[from_i+2])
+                && from[from_i+3]) {
+                from_i += 3;
+            } else {
+                to[to_i++] = from[from_i];
+                if (from[from_i+1])
+                    to[to_i++] = from[++from_i];
+            }
+        }
+        else if (str_equal("-D", from[from_i])
             || str_equal("-I", from[from_i])
             || str_equal("-U", from[from_i])
             || str_equal("-L", from[from_i])

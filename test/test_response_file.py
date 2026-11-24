@@ -194,6 +194,12 @@ class ResponseFileTest(unittest.TestCase):
                     self.assertGreater((self.work / "prefix.pch").stat().st_size, 0)
 
     def test_unity_source_with_pch_compiles_remotely(self):
+        self.compile_unity_source_with_pch()
+
+    def test_cmake_xclang_pch_compiles_remotely(self):
+        self.compile_unity_source_with_pch(wrapped=True)
+
+    def compile_unity_source_with_pch(self, wrapped=False):
         self.require_clang()
         if not self.server:
             self.skipTest("需要 DISTCC_RSP_TEST_SERVER 验证远端编译")
@@ -203,7 +209,9 @@ class ResponseFileTest(unittest.TestCase):
             "#define PCH_VALUE 42\n", encoding="ascii")
         # .cpp 自身没有 include，模拟依赖强制引入头文件的 Unity 单元。
         (self.work / "first.cpp").write_text(
-            "PchType first{PCH_VALUE};\n", encoding="ascii")
+            "PchType first{PCH_VALUE};\n"
+            + ("static_assert(EXTRA_VALUE == 7, \"include\");\n" if wrapped else ""),
+            encoding="ascii")
         (self.work / "second.cpp").write_text(
             "int result() { return first.value; }\n", encoding="ascii")
         (self.work / "unity.cpp").write_text(
@@ -215,13 +223,24 @@ class ResponseFileTest(unittest.TestCase):
         # 额外用 .cpp 后缀，验证扫描器不会把 PCH 路径误认成源文件。
         shutil.copyfile(self.work / "pch files/cache.pch",
                         self.work / "pch files/cache.cpp")
+        (self.work / "pch files/extra.h").write_text(
+            "#define EXTRA_VALUE 7\n", encoding="ascii")
+        shutil.copyfile(self.work / "pch files/extra.h",
+                        self.work / "pch files/extra.cpp")
         for pch in ("pch files/cache.pch", "pch files/cache.cpp"):
             with self.subTest(pch=pch):
                 self.log.unlink()
                 (self.work / "unity.o").unlink(missing_ok=True)
+                options = '-include-pch "{}"'.format(pch)
+                extra = "pch files/extra.cpp" if pch.endswith(".cpp") else "pch files/extra.h"
+                if wrapped:
+                    # 两组真实 CMake 形式，并额外保留一个无关的 cc1 选项。
+                    options = (
+                        '-Xclang -include-pch -Xclang "{}" '
+                        '-Xclang -include -Xclang "{}" '
+                        '-Xclang -fno-spell-checking').format(pch, extra)
                 (self.work / "unity.rsp").write_text(
-                    '-include-pch "{}" -c unity.cpp -o unity.o\n'.format(pch),
-                    encoding="ascii")
+                    options + " -c unity.cpp -o unity.o\n", encoding="ascii")
                 result = self.run_distcc(self.compiler, "@unity.rsp")
                 log = self.log.read_text(encoding="utf-8", errors="replace")
                 self.assertEqual(result.returncode, 0,
@@ -232,6 +251,11 @@ class ResponseFileTest(unittest.TestCase):
                 self.assertEqual(len(remote_args), 1, log)
                 self.assertNotIn("-include-pch", remote_args[0])
                 self.assertNotIn(pch, remote_args[0])
+                if wrapped:
+                    self.assertNotIn(extra, remote_args[0])
+                    self.assertNotIn("-include ", remote_args[0])
+                    self.assertIn("-Xclang -fno-spell-checking", remote_args[0])
+                    self.assertEqual(remote_args[0].split().count("-Xclang"), 1)
                 self.assertGreater((self.work / "unity.o").stat().st_size, 0)
 
 
